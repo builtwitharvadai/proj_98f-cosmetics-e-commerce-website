@@ -27,16 +27,17 @@ model Category {
 
 // Product model for cosmetics items
 model Product {
-  id          String     @id @default(cuid())
+  id          String      @id @default(cuid())
   name        String
   description String
-  price       Decimal    @db.Decimal(10, 2)
+  price       Decimal     @db.Decimal(10, 2)
   imageUrl    String?
   categoryId  String
-  category    Category   @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  category    Category    @relation(fields: [categoryId], references: [id], onDelete: Cascade)
   inventory   Inventory?
-  createdAt   DateTime   @default(now())
-  updatedAt   DateTime   @updatedAt
+  cartItems   CartItem[]
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
 
   @@index([categoryId])
   @@index([name])
@@ -56,4 +57,35 @@ model Inventory {
 
   @@index([productId])
   @@map("inventory")
+}
+
+// Cart model for shopping cart
+model Cart {
+  id        String     @id @default(cuid())
+  userId    String?
+  sessionId String     @unique
+  items     CartItem[]
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+
+  @@index([userId])
+  @@index([sessionId])
+  @@map("carts")
+}
+
+// CartItem model for items in shopping cart
+model CartItem {
+  id            String   @id @default(cuid())
+  cartId        String
+  cart          Cart     @relation(fields: [cartId], references: [id], onDelete: Cascade)
+  productId     String
+  product       Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  quantity      Int      @default(1)
+  priceSnapshot Decimal  @db.Decimal(10, 2)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([cartId])
+  @@index([productId])
+  @@map("cart_items")
 }

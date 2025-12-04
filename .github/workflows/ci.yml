@@ -143,6 +143,7 @@ jobs:
   build-backend:
     name: Build Backend Image
     runs-on: ubuntu-latest
+    if: hashFiles('Dockerfile') != '' && hashFiles('package.json') != ''
     needs:
       - test
       - lint
@@ -198,6 +199,7 @@ jobs:
   build-frontend:
     name: Build Frontend Image
     runs-on: ubuntu-latest
+    if: hashFiles('frontend/Dockerfile') != '' && hashFiles('frontend/package.json') != ''
     needs:
       - test
       - lint

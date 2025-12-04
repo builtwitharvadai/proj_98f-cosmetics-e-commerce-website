@@ -1,0 +1,309 @@
+name: Deploy to Staging
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  KUBECTL_VERSION: '1.28.0'
+
+concurrency:
+  group: staging-deployment
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy to Staging Environment
+    runs-on: ubuntu-latest
+    
+    environment:
+      name: staging
+      url: ${{ steps.deployment.outputs.url }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: ${{ env.KUBECTL_VERSION }}
+      
+      - name: Configure kubeconfig
+        run: |
+          mkdir -p $HOME/.kube
+          echo "${{ secrets.KUBECONFIG_STAGING }}" | base64 -d > $HOME/.kube/config
+          chmod 600 $HOME/.kube/config
+          
+          # Verify connection
+          kubectl cluster-info
+          kubectl get nodes
+      
+      - name: Validate Kubernetes manifests
+        run: |
+          echo "Validating Kubernetes manifests..."
+          
+          for manifest in k8s/*.yaml; do
+            echo "Validating $manifest"
+            kubectl apply --dry-run=client -f "$manifest" -n staging
+          done
+          
+          echo "All manifests validated successfully"
+      
+      - name: Update image tags to commit SHA
+        run: |
+          COMMIT_SHA="${{ github.sha }}"
+          IMAGE_TAG="main-${COMMIT_SHA:0:7}"
+          
+          echo "Updating image tags to: $IMAGE_TAG"
+          
+          # Update backend deployment
+          kubectl set image deployment/backend-deployment \
+            backend=ghcr.io/${{ github.repository }}/backend:$IMAGE_TAG \
+            -n staging \
+            --record
+          
+          # Update frontend deployment
+          kubectl set image deployment/frontend-deployment \
+            frontend=ghcr.io/${{ github.repository }}/frontend:$IMAGE_TAG \
+            -n staging \
+            --record
+          
+          # Annotate deployments with change cause
+          kubectl annotate deployment/backend-deployment \
+            kubernetes.io/change-cause="Deploy commit ${COMMIT_SHA} to staging" \
+            -n staging \
+            --overwrite
+          
+          kubectl annotate deployment/frontend-deployment \
+            kubernetes.io/change-cause="Deploy commit ${COMMIT_SHA} to staging" \
+            -n staging \
+            --overwrite
+      
+      - name: Apply Kubernetes manifests
+        run: |
+          echo "Applying Kubernetes manifests to staging namespace..."
+          kubectl apply -f k8s/ -n staging
+          
+          echo "Manifests applied successfully"
+      
+      - name: Wait for backend rollout
+        run: |
+          echo "Waiting for backend deployment rollout..."
+          kubectl rollout status deployment/backend-deployment \
+            -n staging \
+            --timeout=10m
+          
+          echo "Backend deployment rolled out successfully"
+      
+      - name: Wait for frontend rollout
+        run: |
+          echo "Waiting for frontend deployment rollout..."
+          kubectl rollout status deployment/frontend-deployment \
+            -n staging \
+            --timeout=10m
+          
+          echo "Frontend deployment rolled out successfully"
+      
+      - name: Run health checks
+        run: |
+          echo "Running health checks..."
+          
+          # Wait for pods to be ready
+          kubectl wait --for=condition=ready pod \
+            -l app=backend \
+            -n staging \
+            --timeout=5m
+          
+          kubectl wait --for=condition=ready pod \
+            -l app=frontend \
+            -n staging \
+            --timeout=5m
+          
+          # Get pod status
+          echo "Backend pods:"
+          kubectl get pods -l app=backend -n staging
+          
+          echo "Frontend pods:"
+          kubectl get pods -l app=frontend -n staging
+          
+          # Check service endpoints
+          echo "Service endpoints:"
+          kubectl get endpoints -n staging
+          
+          echo "Health checks completed successfully"
+      
+      - name: Run smoke tests
+        run: |
+          echo "Running smoke tests..."
+          
+          # Get backend pod name
+          BACKEND_POD=$(kubectl get pod -l app=backend -n staging -o jsonpath='{.items[0].metadata.name}')
+          
+          echo "Running smoke tests on pod: $BACKEND_POD"
+          
+          # Execute smoke tests
+          kubectl exec -n staging deployment/backend-deployment -- npm run test:smoke || {
+            echo "Smoke tests failed"
+            exit 1
+          }
+          
+          echo "Smoke tests passed successfully"
+      
+      - name: Get deployment URL
+        id: deployment
+        run: |
+          # Get ingress URL
+          INGRESS_HOST=$(kubectl get ingress -n staging -o jsonpath='{.items[0].spec.rules[0].host}')
+          
+          if [ -z "$INGRESS_HOST" ]; then
+            echo "Warning: Could not retrieve ingress host"
+            DEPLOYMENT_URL="https://staging.example.com"
+          else
+            DEPLOYMENT_URL="https://$INGRESS_HOST"
+          fi
+          
+          echo "url=$DEPLOYMENT_URL" >> $GITHUB_OUTPUT
+          echo "Deployment URL: $DEPLOYMENT_URL"
+      
+      - name: Verify deployment
+        run: |
+          echo "Verifying deployment..."
+          
+          # Get deployment details
+          echo "Backend deployment:"
+          kubectl get deployment backend-deployment -n staging -o wide
+          
+          echo "Frontend deployment:"
+          kubectl get deployment frontend-deployment -n staging -o wide
+          
+          # Get replica counts
+          BACKEND_REPLICAS=$(kubectl get deployment backend-deployment -n staging -o jsonpath='{.status.availableReplicas}')
+          FRONTEND_REPLICAS=$(kubectl get deployment frontend-deployment -n staging -o jsonpath='{.status.availableReplicas}')
+          
+          echo "Backend available replicas: $BACKEND_REPLICAS"
+          echo "Frontend available replicas: $FRONTEND_REPLICAS"
+          
+          if [ "$BACKEND_REPLICAS" -lt 1 ] || [ "$FRONTEND_REPLICAS" -lt 1 ]; then
+            echo "Error: Insufficient replicas available"
+            exit 1
+          fi
+          
+          echo "Deployment verified successfully"
+      
+      - name: Notify Slack on success
+        if: success()
+        uses: 8398a7/action-slack@v3
+        with:
+          status: custom
+          custom_payload: |
+            {
+              "text": "✅ Staging Deployment Successful",
+              "attachments": [{
+                "color": "good",
+                "fields": [
+                  {
+                    "title": "Environment",
+                    "value": "Staging",
+                    "short": true
+                  },
+                  {
+                    "title": "Commit",
+                    "value": "${{ github.sha }}",
+                    "short": true
+                  },
+                  {
+                    "title": "Branch",
+                    "value": "${{ github.ref_name }}",
+                    "short": true
+                  },
+                  {
+                    "title": "Author",
+                    "value": "${{ github.actor }}",
+                    "short": true
+                  },
+                  {
+                    "title": "URL",
+                    "value": "${{ steps.deployment.outputs.url }}",
+                    "short": false
+                  },
+                  {
+                    "title": "Workflow",
+                    "value": "<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Workflow>",
+                    "short": false
+                  }
+                ]
+              }]
+            }
+          webhook_url: ${{ secrets.SLACK_WEBHOOK }}
+      
+      - name: Rollback on failure
+        if: failure()
+        run: |
+          echo "Deployment failed, initiating rollback..."
+          
+          # Rollback backend deployment
+          echo "Rolling back backend deployment..."
+          kubectl rollout undo deployment/backend-deployment -n staging
+          kubectl rollout status deployment/backend-deployment -n staging --timeout=5m
+          
+          # Rollback frontend deployment
+          echo "Rolling back frontend deployment..."
+          kubectl rollout undo deployment/frontend-deployment -n staging
+          kubectl rollout status deployment/frontend-deployment -n staging --timeout=5m
+          
+          echo "Rollback completed"
+          
+          # Get rollback status
+          echo "Post-rollback status:"
+          kubectl get deployments -n staging
+          kubectl get pods -n staging
+      
+      - name: Notify Slack on failure
+        if: failure()
+        uses: 8398a7/action-slack@v3
+        with:
+          status: custom
+          custom_payload: |
+            {
+              "text": "❌ Staging Deployment Failed",
+              "attachments": [{
+                "color": "danger",
+                "fields": [
+                  {
+                    "title": "Environment",
+                    "value": "Staging",
+                    "short": true
+                  },
+                  {
+                    "title": "Commit",
+                    "value": "${{ github.sha }}",
+                    "short": true
+                  },
+                  {
+                    "title": "Branch",
+                    "value": "${{ github.ref_name }}",
+                    "short": true
+                  },
+                  {
+                    "title": "Author",
+                    "value": "${{ github.actor }}",
+                    "short": true
+                  },
+                  {
+                    "title": "Status",
+                    "value": "Rolled back to previous version",
+                    "short": false
+                  },
+                  {
+                    "title": "Workflow",
+                    "value": "<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Workflow>",
+                    "short": false
+                  }
+                ]
+              }]
+            }
+          webhook_url: ${{ secrets.SLACK_WEBHOOK }}

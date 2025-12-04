@@ -34,6 +34,6 @@ Before you begin, ensure you have the following installed:
 - **Node.js** >= 20.0.0
 - **npm** >= 10.0.0
 - **PostgreSQL** (for database)
-- **Redis** (for caching)
+- **Redis** >= 7.0 (for session storage and caching)
 
 Verify your installations:

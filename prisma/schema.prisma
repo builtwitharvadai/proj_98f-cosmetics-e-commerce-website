@@ -19,6 +19,7 @@ model User {
   name          String
   carts         Cart[]
   refreshTokens RefreshToken[]
+  payments      Payment[]
   createdAt     DateTime       @default(now())
   updatedAt     DateTime       @updatedAt
 
@@ -95,6 +96,7 @@ model Cart {
   user      User?      @relation(fields: [userId], references: [id], onDelete: SetNull)
   sessionId String     @unique
   items     CartItem[]
+  payment   Payment?
   createdAt DateTime   @default(now())
   updatedAt DateTime   @updatedAt
 
@@ -118,4 +120,26 @@ model CartItem {
   @@index([cartId])
   @@index([productId])
   @@map("cart_items")
+}
+
+// Payment model for payment tracking
+model Payment {
+  id                    String   @id @default(cuid())
+  userId                String
+  user                  User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  cartId                String   @unique
+  cart                  Cart     @relation(fields: [cartId], references: [id], onDelete: Cascade)
+  stripePaymentIntentId String   @unique
+  amount                Decimal  @db.Decimal(10, 2)
+  currency              String   @default("usd")
+  status                String
+  paymentMethod         String?
+  last4                 String?
+  brand                 String?
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  @@index([userId])
+  @@index([stripePaymentIntentId])
+  @@map("payments")
 }

@@ -12,7 +12,7 @@ This platform provides a complete e-commerce solution for cosmetics retailers, i
 - **Shopping Cart** - Add products to cart, manage quantities, and view totals with automatic tax calculation
 - **Product Catalog** - Browse and search cosmetics products
 - **Order Processing** - Complete checkout and order management
-- **Payment Integration** - Secure payment processing
+- **Payment Integration** - Secure payment processing with Stripe
 - **Session Management** - Persistent shopping experience across sessions
 
 ## Tech Stack
@@ -88,3 +88,32 @@ For detailed API documentation, see [Authentication API Endpoints](docs/api/auth
 
 **JWT Secrets Configuration:**
 Set the following environment variables for JWT token signing:
+
+## Payment Processing
+
+The payment system provides secure payment processing through Stripe integration with PCI-compliant tokenization.
+
+### Payment Features
+
+- **Stripe Integration** - Industry-leading payment gateway with robust security
+- **Credit/Debit Cards** - Accept all major card brands (Visa, Mastercard, American Express)
+- **Digital Wallets** - Support for Apple Pay and Google Pay
+- **Secure Tokenization** - PCI-compliant card data handling with Stripe Elements
+- **Payment Intents** - Secure payment flow with built-in fraud protection
+- **Webhook Events** - Real-time payment status updates and notifications
+- **Refund Support** - Process full and partial refunds through the API
+
+### API Endpoints
+
+For detailed API documentation, see [Payment API Endpoints](docs/api/payment-endpoints.md).
+
+**Payment Operations:**
+- `POST /api/payment/create-intent` - Create payment intent for checkout
+- `POST /api/payment/confirm` - Confirm payment with payment method
+- `POST /api/payment/webhook` - Handle Stripe webhook events
+- `POST /api/payment/refund` - Process payment refund
+- `GET /api/payment/:id` - Get payment details by ID
+
+### Stripe Configuration
+
+Set the following environment variables for Stripe integration:

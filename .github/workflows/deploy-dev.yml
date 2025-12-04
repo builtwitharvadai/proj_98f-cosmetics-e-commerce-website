@@ -1,0 +1,229 @@
+name: Deploy to Development
+
+on:
+  push:
+    branches:
+      - develop
+
+env:
+  KUBECTL_VERSION: '1.28.0'
+
+jobs:
+  deploy:
+    name: Deploy to Development
+    runs-on: ubuntu-latest
+    
+    environment:
+      name: development
+      url: ${{ steps.deployment.outputs.url }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: v${{ env.KUBECTL_VERSION }}
+      
+      - name: Configure kubeconfig
+        run: |
+          mkdir -p $HOME/.kube
+          echo "${{ secrets.KUBECONFIG_DEV }}" | base64 -d > $HOME/.kube/config
+          chmod 600 $HOME/.kube/config
+      
+      - name: Validate Kubernetes manifests
+        run: |
+          kubectl apply --dry-run=client -f k8s/
+      
+      - name: Update image tags with commit SHA
+        run: |
+          kubectl set image deployment/backend-deployment \
+            backend=ghcr.io/${{ github.repository }}/backend:${{ github.sha }} \
+            -n development \
+            --dry-run=client -o yaml | kubectl apply -f -
+          
+          kubectl set image deployment/frontend-deployment \
+            frontend=ghcr.io/${{ github.repository }}/frontend:${{ github.sha }} \
+            -n development \
+            --dry-run=client -o yaml | kubectl apply -f -
+      
+      - name: Apply Kubernetes manifests
+        run: |
+          kubectl apply -f k8s/ -n development
+      
+      - name: Wait for backend rollout
+        run: |
+          kubectl rollout status deployment/backend-deployment \
+            -n development \
+            --timeout=10m
+      
+      - name: Wait for frontend rollout
+        run: |
+          kubectl rollout status deployment/frontend-deployment \
+            -n development \
+            --timeout=10m
+      
+      - name: Run health checks
+        id: health-check
+        run: |
+          echo "Running health checks..."
+          
+          for i in {1..30}; do
+            if kubectl exec -n development deployment/backend-deployment -- curl -f http://localhost:3001/health; then
+              echo "Backend health check passed"
+              break
+            fi
+            
+            if [ $i -eq 30 ]; then
+              echo "Backend health check failed after 30 attempts"
+              exit 1
+            fi
+            
+            echo "Attempt $i failed, retrying in 10 seconds..."
+            sleep 10
+          done
+      
+      - name: Get deployment URL
+        id: deployment
+        run: |
+          INGRESS_IP=$(kubectl get ingress -n development -o jsonpath='{.items[0].status.loadBalancer.ingress[0].ip}')
+          if [ -z "$INGRESS_IP" ]; then
+            INGRESS_IP=$(kubectl get ingress -n development -o jsonpath='{.items[0].status.loadBalancer.ingress[0].hostname}')
+          fi
+          
+          if [ -z "$INGRESS_IP" ]; then
+            echo "url=https://dev.example.com" >> $GITHUB_OUTPUT
+          else
+            echo "url=http://$INGRESS_IP" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Notify Slack on success
+        if: success()
+        uses: slackapi/slack-github-action@v1.25.0
+        with:
+          payload: |
+            {
+              "text": "✅ Development Deployment Successful",
+              "blocks": [
+                {
+                  "type": "header",
+                  "text": {
+                    "type": "plain_text",
+                    "text": "✅ Development Deployment Successful"
+                  }
+                },
+                {
+                  "type": "section",
+                  "fields": [
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Environment:*\nDevelopment"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Commit:*\n${{ github.sha }}"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Branch:*\n${{ github.ref_name }}"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Deployed by:*\n${{ github.actor }}"
+                    }
+                  ]
+                },
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*URL:* ${{ steps.deployment.outputs.url }}"
+                  }
+                },
+                {
+                  "type": "context",
+                  "elements": [
+                    {
+                      "type": "mrkdwn",
+                      "text": "Workflow: <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Run>"
+                    }
+                  ]
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
+      
+      - name: Notify Slack on failure
+        if: failure()
+        uses: slackapi/slack-github-action@v1.25.0
+        with:
+          payload: |
+            {
+              "text": "❌ Development Deployment Failed",
+              "blocks": [
+                {
+                  "type": "header",
+                  "text": {
+                    "type": "plain_text",
+                    "text": "❌ Development Deployment Failed"
+                  }
+                },
+                {
+                  "type": "section",
+                  "fields": [
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Environment:*\nDevelopment"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Commit:*\n${{ github.sha }}"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Branch:*\n${{ github.ref_name }}"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Deployed by:*\n${{ github.actor }}"
+                    }
+                  ]
+                },
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "⚠️ *Rollback initiated*"
+                  }
+                },
+                {
+                  "type": "context",
+                  "elements": [
+                    {
+                      "type": "mrkdwn",
+                      "text": "Workflow: <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Run>"
+                    }
+                  ]
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
+      
+      - name: Rollback on failure
+        if: failure()
+        run: |
+          echo "Deployment failed, initiating rollback..."
+          
+          kubectl rollout undo deployment/backend-deployment -n development
+          kubectl rollout undo deployment/frontend-deployment -n development
+          
+          echo "Waiting for rollback to complete..."
+          kubectl rollout status deployment/backend-deployment -n development --timeout=5m
+          kubectl rollout status deployment/frontend-deployment -n development --timeout=5m
+          
+          echo "Rollback completed successfully"

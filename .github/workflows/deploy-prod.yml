@@ -1,0 +1,357 @@
+name: Deploy to Production
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to deploy'
+        required: true
+        type: string
+      rollback:
+        description: 'Rollback to previous version'
+        required: false
+        type: boolean
+        default: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+concurrency:
+  group: production-deployment
+  cancel-in-progress: false
+
+jobs:
+  approve:
+    name: Production Approval Gate
+    runs-on: ubuntu-latest
+    environment:
+      name: production-approval
+    
+    steps:
+      - name: Wait for approval
+        run: |
+          echo "⏳ Waiting for production deployment approval..."
+          echo "Version: ${{ inputs.version }}"
+          echo "Rollback: ${{ inputs.rollback }}"
+
+  deploy-blue-green:
+    name: Blue-Green Production Deployment
+    runs-on: ubuntu-latest
+    needs: approve
+    timeout-minutes: 30
+    
+    environment:
+      name: production
+      url: ${{ steps.deployment.outputs.url }}
+    
+    outputs:
+      deployment-url: ${{ steps.deployment.outputs.url }}
+      active-slot: ${{ steps.determine-slots.outputs.active_slot }}
+      target-slot: ${{ steps.determine-slots.outputs.target_slot }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'v1.28.0'
+      
+      - name: Configure kubeconfig
+        run: |
+          mkdir -p $HOME/.kube
+          echo "${{ secrets.KUBECONFIG_PROD }}" | base64 -d > $HOME/.kube/config
+          chmod 600 $HOME/.kube/config
+          
+          kubectl cluster-info
+          kubectl get nodes
+      
+      - name: Determine active and target slots
+        id: determine-slots
+        run: |
+          ACTIVE_SLOT=$(kubectl get service backend-service -n production -o jsonpath='{.spec.selector.slot}' 2>/dev/null || echo "blue")
+          
+          if [ "$ACTIVE_SLOT" = "blue" ]; then
+            TARGET_SLOT="green"
+          else
+            TARGET_SLOT="blue"
+          fi
+          
+          echo "active_slot=$ACTIVE_SLOT" >> $GITHUB_OUTPUT
+          echo "target_slot=$TARGET_SLOT" >> $GITHUB_OUTPUT
+          
+          echo "🔵 Current active slot: $ACTIVE_SLOT"
+          echo "🟢 Target deployment slot: $TARGET_SLOT"
+      
+      - name: Rollback to previous version
+        if: inputs.rollback == true
+        run: |
+          echo "🔄 Rolling back to previous version..."
+          
+          PREVIOUS_SLOT="${{ steps.determine-slots.outputs.active_slot }}"
+          
+          echo "Switching service to $PREVIOUS_SLOT slot"
+          kubectl patch service backend-service -n production \
+            -p "{\"spec\":{\"selector\":{\"slot\":\"$PREVIOUS_SLOT\"}}}"
+          
+          kubectl patch service frontend-service -n production \
+            -p "{\"spec\":{\"selector\":{\"slot\":\"$PREVIOUS_SLOT\"}}}"
+          
+          echo "✅ Rollback completed - traffic switched to $PREVIOUS_SLOT"
+          
+          kubectl get deployments -n production -l slot=$PREVIOUS_SLOT
+          kubectl get services -n production
+      
+      - name: Deploy backend to green slot
+        if: inputs.rollback == false
+        run: |
+          TARGET_SLOT="${{ steps.determine-slots.outputs.target_slot }}"
+          VERSION="${{ inputs.version }}"
+          
+          echo "🚀 Deploying backend version $VERSION to $TARGET_SLOT slot"
+          
+          kubectl get deployment backend-deployment -n production -o yaml | \
+            sed "s/slot: .*/slot: $TARGET_SLOT/" | \
+            sed "s|image: .*backend:.*|image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/backend:$VERSION|" | \
+            kubectl apply -f -
+          
+          kubectl label deployment backend-deployment -n production slot=$TARGET_SLOT --overwrite
+          
+          echo "⏳ Waiting for backend rollout to complete..."
+          kubectl rollout status deployment/backend-deployment -n production --timeout=15m
+          
+          echo "✅ Backend deployed successfully to $TARGET_SLOT slot"
+      
+      - name: Deploy frontend to green slot
+        if: inputs.rollback == false
+        run: |
+          TARGET_SLOT="${{ steps.determine-slots.outputs.target_slot }}"
+          VERSION="${{ inputs.version }}"
+          
+          echo "🚀 Deploying frontend version $VERSION to $TARGET_SLOT slot"
+          
+          kubectl get deployment frontend-deployment -n production -o yaml | \
+            sed "s/slot: .*/slot: $TARGET_SLOT/" | \
+            sed "s|image: .*frontend:.*|image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/frontend:$VERSION|" | \
+            kubectl apply -f -
+          
+          kubectl label deployment frontend-deployment -n production slot=$TARGET_SLOT --overwrite
+          
+          echo "⏳ Waiting for frontend rollout to complete..."
+          kubectl rollout status deployment/frontend-deployment -n production --timeout=15m
+          
+          echo "✅ Frontend deployed successfully to $TARGET_SLOT slot"
+      
+      - name: Run smoke tests on green slot
+        if: inputs.rollback == false
+        run: |
+          TARGET_SLOT="${{ steps.determine-slots.outputs.target_slot }}"
+          
+          echo "🧪 Running smoke tests on $TARGET_SLOT slot..."
+          
+          BACKEND_POD=$(kubectl get pods -n production -l app=backend,slot=$TARGET_SLOT -o jsonpath='{.items[0].metadata.name}')
+          FRONTEND_POD=$(kubectl get pods -n production -l app=frontend,slot=$TARGET_SLOT -o jsonpath='{.items[0].metadata.name}')
+          
+          echo "Testing backend pod: $BACKEND_POD"
+          kubectl exec -n production $BACKEND_POD -- curl -f http://localhost:3001/health || exit 1
+          
+          echo "Testing frontend pod: $FRONTEND_POD"
+          kubectl exec -n production $FRONTEND_POD -- curl -f http://localhost:3000/health || exit 1
+          
+          echo "✅ Smoke tests passed on $TARGET_SLOT slot"
+      
+      - name: Switch traffic to green slot
+        if: inputs.rollback == false
+        run: |
+          TARGET_SLOT="${{ steps.determine-slots.outputs.target_slot }}"
+          
+          echo "🔀 Switching production traffic to $TARGET_SLOT slot..."
+          
+          kubectl patch service backend-service -n production \
+            -p "{\"spec\":{\"selector\":{\"slot\":\"$TARGET_SLOT\"}}}"
+          
+          kubectl patch service frontend-service -n production \
+            -p "{\"spec\":{\"selector\":{\"slot\":\"$TARGET_SLOT\"}}}"
+          
+          echo "✅ Traffic switched to $TARGET_SLOT slot"
+          
+          kubectl get services -n production
+      
+      - name: Update blue slot to new version
+        if: inputs.rollback == false
+        run: |
+          ACTIVE_SLOT="${{ steps.determine-slots.outputs.active_slot }}"
+          VERSION="${{ inputs.version }}"
+          
+          echo "🔄 Updating $ACTIVE_SLOT slot to version $VERSION for next deployment..."
+          
+          kubectl get deployment backend-deployment -n production -o yaml | \
+            sed "s/slot: .*/slot: $ACTIVE_SLOT/" | \
+            sed "s|image: .*backend:.*|image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/backend:$VERSION|" | \
+            kubectl apply -f -
+          
+          kubectl label deployment backend-deployment -n production slot=$ACTIVE_SLOT --overwrite
+          
+          kubectl get deployment frontend-deployment -n production -o yaml | \
+            sed "s/slot: .*/slot: $ACTIVE_SLOT/" | \
+            sed "s|image: .*frontend:.*|image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/frontend:$VERSION|" | \
+            kubectl apply -f -
+          
+          kubectl label deployment frontend-deployment -n production slot=$ACTIVE_SLOT --overwrite
+          
+          echo "✅ $ACTIVE_SLOT slot updated to version $VERSION"
+      
+      - name: Verify production health
+        run: |
+          echo "🏥 Running production health checks..."
+          
+          for i in {1..30}; do
+            BACKEND_STATUS=$(kubectl exec -n production $(kubectl get pods -n production -l app=backend -o jsonpath='{.items[0].metadata.name}') -- curl -s -o /dev/null -w "%{http_code}" http://localhost:3001/health)
+            FRONTEND_STATUS=$(kubectl exec -n production $(kubectl get pods -n production -l app=frontend -o jsonpath='{.items[0].metadata.name}') -- curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/health)
+            
+            if [ "$BACKEND_STATUS" -eq 200 ] && [ "$FRONTEND_STATUS" -eq 200 ]; then
+              echo "✅ Health check $i passed - Backend: $BACKEND_STATUS, Frontend: $FRONTEND_STATUS"
+            else
+              echo "⚠️  Health check $i failed - Backend: $BACKEND_STATUS, Frontend: $FRONTEND_STATUS"
+              if [ $i -eq 30 ]; then
+                echo "❌ Health checks failed after 30 attempts"
+                exit 1
+              fi
+            fi
+            
+            sleep 10
+          done
+          
+          echo "✅ All health checks passed"
+      
+      - name: Set deployment URL
+        id: deployment
+        run: |
+          INGRESS_URL=$(kubectl get ingress -n production -o jsonpath='{.items[0].spec.rules[0].host}')
+          echo "url=https://$INGRESS_URL" >> $GITHUB_OUTPUT
+          echo "🌐 Production URL: https://$INGRESS_URL"
+      
+      - name: Auto-rollback on failure
+        if: failure()
+        run: |
+          echo "❌ Deployment failed - initiating automatic rollback..."
+          
+          PREVIOUS_SLOT="${{ steps.determine-slots.outputs.active_slot }}"
+          
+          echo "🔄 Rolling back to $PREVIOUS_SLOT slot"
+          
+          kubectl patch service backend-service -n production \
+            -p "{\"spec\":{\"selector\":{\"slot\":\"$PREVIOUS_SLOT\"}}}"
+          
+          kubectl patch service frontend-service -n production \
+            -p "{\"spec\":{\"selector\":{\"slot\":\"$PREVIOUS_SLOT\"}}}"
+          
+          echo "✅ Automatic rollback completed - traffic restored to $PREVIOUS_SLOT"
+          
+          kubectl get deployments -n production
+          kubectl get services -n production
+          kubectl get pods -n production
+      
+      - name: Notify Slack on success
+        if: success()
+        uses: 8398a7/action-slack@v3
+        with:
+          status: custom
+          custom_payload: |
+            {
+              "text": "🚀 Production Deployment Successful",
+              "attachments": [{
+                "color": "good",
+                "fields": [
+                  {
+                    "title": "Environment",
+                    "value": "Production",
+                    "short": true
+                  },
+                  {
+                    "title": "Version",
+                    "value": "${{ inputs.version }}",
+                    "short": true
+                  },
+                  {
+                    "title": "Strategy",
+                    "value": "Blue-Green",
+                    "short": true
+                  },
+                  {
+                    "title": "Active Slot",
+                    "value": "${{ steps.determine-slots.outputs.target_slot }}",
+                    "short": true
+                  },
+                  {
+                    "title": "Rollback",
+                    "value": "${{ inputs.rollback }}",
+                    "short": true
+                  },
+                  {
+                    "title": "URL",
+                    "value": "${{ steps.deployment.outputs.url }}",
+                    "short": false
+                  },
+                  {
+                    "title": "Deployed By",
+                    "value": "${{ github.actor }}",
+                    "short": true
+                  },
+                  {
+                    "title": "Commit",
+                    "value": "${{ github.sha }}",
+                    "short": true
+                  }
+                ]
+              }]
+            }
+          webhook_url: ${{ secrets.SLACK_WEBHOOK }}
+      
+      - name: Notify Slack on failure
+        if: failure()
+        uses: 8398a7/action-slack@v3
+        with:
+          status: custom
+          custom_payload: |
+            {
+              "text": "❌ Production Deployment Failed",
+              "attachments": [{
+                "color": "danger",
+                "fields": [
+                  {
+                    "title": "Environment",
+                    "value": "Production",
+                    "short": true
+                  },
+                  {
+                    "title": "Version",
+                    "value": "${{ inputs.version }}",
+                    "short": true
+                  },
+                  {
+                    "title": "Rollback Status",
+                    "value": "Automatic rollback initiated",
+                    "short": false
+                  },
+                  {
+                    "title": "Active Slot",
+                    "value": "${{ steps.determine-slots.outputs.active_slot }}",
+                    "short": true
+                  },
+                  {
+                    "title": "Failed By",
+                    "value": "${{ github.actor }}",
+                    "short": true
+                  },
+                  {
+                    "title": "Workflow Run",
+                    "value": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}",
+                    "short": false
+                  }
+                ]
+              }]
+            }
+          webhook_url: ${{ secrets.SLACK_WEBHOOK }}

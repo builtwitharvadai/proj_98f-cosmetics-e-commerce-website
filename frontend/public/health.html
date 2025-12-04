@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Health Check</title>
+</head>
+<body>
+  <h1>Frontend Healthy</h1>
+  <p>Status: OK</p>
+  <p>Timestamp: <span id="timestamp"></span></p>
+  <script>
+    document.getElementById('timestamp').innerHTML = new Date().toISOString();
+  </script>
+</body>
+</html>

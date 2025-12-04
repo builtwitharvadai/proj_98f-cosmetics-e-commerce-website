@@ -8,9 +8,9 @@ This platform provides a complete e-commerce solution for cosmetics retailers, i
 
 ## Features
 
+- **User Authentication** - Secure user registration and login with JWT tokens
 - **Shopping Cart** - Add products to cart, manage quantities, and view totals with automatic tax calculation
 - **Product Catalog** - Browse and search cosmetics products
-- **User Authentication** - Secure user registration and login
 - **Order Processing** - Complete checkout and order management
 - **Payment Integration** - Secure payment processing
 - **Session Management** - Persistent shopping experience across sessions
@@ -47,32 +47,44 @@ Before you begin, ensure you have the following installed:
 
 Verify your installations:
 
-## Shopping Cart
+## Authentication
 
-The shopping cart system provides a seamless shopping experience for both guest and authenticated users.
+The authentication system provides secure user account management with JWT-based token authentication.
 
-### Cart Features
+### Authentication Features
 
-- **Add/Remove Items** - Add products to cart and remove unwanted items
-- **Quantity Management** - Update item quantities with real-time inventory validation
-- **Price Snapshots** - Preserve product prices at the time of adding to cart
-- **Tax Calculation** - Automatic tax calculation based on configurable rate
-- **Session-Based Cart** - Guest users can shop without creating an account
-- **Persistent Cart** - Authenticated users' carts persist across sessions
-- **Inventory Validation** - Prevents adding more items than available stock
+- **User Registration** - Create new user accounts with email and password
+- **Secure Login** - Authenticate users with credential validation
+- **JWT Tokens** - Stateless authentication with JSON Web Tokens
+- **Refresh Token Rotation** - Automatic token refresh for extended sessions
+- **Password Security** - Bcrypt hashing with 10 salt rounds
+- **Token Revocation** - Logout functionality with refresh token invalidation
+
+### Password Requirements
+
+User passwords must meet the following criteria:
+- Minimum 8 characters
+- At least one uppercase letter
+- At least one lowercase letter
+- At least one number
+
+### Token Expiry
+
+- **Access Tokens** - 15 minutes (short-lived for security)
+- **Refresh Tokens** - 7 days (long-lived for user convenience)
 
 ### API Endpoints
 
-For detailed API documentation, see [Cart API Endpoints](docs/api/cart-endpoints.md).
+For detailed API documentation, see [Authentication API Endpoints](docs/api/auth-endpoints.md).
 
-**Cart Operations:**
-- `POST /api/cart/items` - Add product to cart
-- `GET /api/cart` - Retrieve cart with items and totals
-- `PUT /api/cart/items/:id` - Update item quantity
-- `DELETE /api/cart/items/:id` - Remove item from cart
-- `DELETE /api/cart` - Clear entire cart
+**Authentication Operations:**
+- `POST /api/auth/register` - Register new user account
+- `POST /api/auth/login` - Login and receive JWT tokens
+- `POST /api/auth/refresh` - Refresh access token using refresh token
+- `POST /api/auth/logout` - Logout and invalidate refresh token
+- `GET /api/auth/me` - Get current authenticated user profile
 
 ### Configuration
 
-**Tax Rate Configuration:**
-Set the `TAX_RATE` environment variable to configure the tax rate (as decimal):
+**JWT Secrets Configuration:**
+Set the following environment variables for JWT token signing:

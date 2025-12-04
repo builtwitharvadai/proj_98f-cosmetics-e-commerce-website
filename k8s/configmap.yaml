@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+  namespace: production
+  labels:
+    app: cosmetics-ecommerce
+    component: configuration
+    environment: production
+    managed-by: kubernetes
+  annotations:
+    description: "Environment-specific configuration for cosmetics e-commerce application"
+data:
+  LOG_LEVEL: "info"
+  ENVIRONMENT: "production"
+  NODE_ENV: "production"
+  API_BASE_URL: "http://backend-service"
+  FRONTEND_URL: "http://frontend-service"

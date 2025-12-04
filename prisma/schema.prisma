@@ -11,6 +11,35 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+// User model for authentication
+model User {
+  id            String         @id @default(cuid())
+  email         String         @unique
+  passwordHash  String
+  name          String
+  carts         Cart[]
+  refreshTokens RefreshToken[]
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+
+  @@index([email])
+  @@map("users")
+}
+
+// RefreshToken model for JWT token management
+model RefreshToken {
+  id        String   @id @default(cuid())
+  token     String   @unique
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([token])
+  @@map("refresh_tokens")
+}
+
 // Category model for product organization
 model Category {
   id          String    @id @default(cuid())
@@ -63,6 +92,7 @@ model Inventory {
 model Cart {
   id        String     @id @default(cuid())
   userId    String?
+  user      User?      @relation(fields: [userId], references: [id], onDelete: SetNull)
   sessionId String     @unique
   items     CartItem[]
   createdAt DateTime   @default(now())
